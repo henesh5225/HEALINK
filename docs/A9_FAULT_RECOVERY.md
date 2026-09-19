@@ -1,8 +1,8 @@
-# A9 — Fault Injection and Recovery Validation
+# Fault Injection and Recovery Validation
 
 ## Purpose
 
-A9 verifies that HEALINK's deterministic safety and temporal-quality layers behave correctly when sensor state degrades and later recovers.
+It verifies that HEALINK's deterministic safety and temporal-quality layers behave correctly when sensor state degrades and later recovers.
 
 ## Test boundary
 
