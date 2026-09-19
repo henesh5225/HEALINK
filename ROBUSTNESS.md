@@ -1,4 +1,4 @@
-# HEALINK A10 — Robustness and Long-Duration Validation
+# Robustness and Long-Duration Validation
 
 ## Purpose
 
