@@ -4,9 +4,9 @@ QNX-based wearable health sensor-fusion project for QNX India eHACK 2026, Proble
 
 ## What the program does
 
-HEALINK reads real hardware on a Raspberry Pi 4 running QNX. Sensor threads run at different rates and update shared state. The fusion layer checks freshness, signal quality and agreement between measurements. The classifier and deterministic safety layer then turn that information into health and safety states.
+HEALINK reads real hardware on a Raspberry Pi 4 running QNX. Independent sensor tasks acquire measurements at different rates and publish timestamped state into the fusion layer. The fusion pipeline evaluates freshness, signal quality and cross-sensor consistency before the classifier and deterministic safety logic produce the current health and safety state.
 
-The project does not create fake sensor values. A missing device is shown as OFFLINE, and a missed update can become STALE.
+The design is intended to keep acquisition, fusion and safety processing separate while still allowing heterogeneous sensor streams to be combined at a common decision rate.
 
 ## Hardware
 
@@ -18,25 +18,59 @@ The project does not create fake sensor values. A missing device is shown as OFF
 - SSD1306 - local OLED interface
 - SX1278 - LoRa emergency link
 
-## Manual SOS test
+## Real-time sensor fusion
 
-The QNX-side LoRa test can be triggered in either of these ways:
-
-```text
-GPIO24 button       -> EVENT_SOS
-Keyboard S          -> EVENT_SOS
-```
-
-The final build is manual-only for LoRa. Sensor distress, fall, and emergency events are still evaluated and logged, but they do not start LoRa transmission.
-
-The ESP32 remote node accepts an ACK from:
+HEALINK uses multi-rate periodic workloads so each sensor can run at a rate appropriate to its data source while the fusion task operates on a synchronized view of the latest measurements.
 
 ```text
-GPIO27 button
-Serial Monitor: A + Enter
+MAX30102   100 Hz   -> PPG / SpO2 / heart-rate information
+AD8232     250 Hz   -> ECG acquisition / heart-rate information
+MPU6050     50 Hz   -> motion / fall context
+DS18B20      1 Hz   -> temperature
+DHT11      0.5 Hz   -> ambient context
+FUSION      20 Hz   -> synchronized health-state decision
 ```
 
-The LoRa path uses CRC, event IDs, bounded retries, RSSI/SNR and ACK timing.
+Shared state carries the latest value, timestamp, validity and quality information. The fusion layer checks whether each input is fresh enough to be trusted and whether independent measurements agree before using them as evidence for classification.
+
+## Fault-aware operation
+
+HEALINK explicitly distinguishes between different sensor conditions instead of treating every missing or abnormal sample as valid data.
+
+```text
+VALID          sensor data is available and current
+STALE          expected updates stopped or exceeded the freshness limit
+OFFLINE        device is unavailable or could not be brought online
+FAULT          driver or acquisition path reported a failure
+INCONSISTENT   independent measurements disagree beyond the configured policy
+```
+
+These conditions are represented in the runtime state masks and are visible through the CLI. The fusion and safety layers use the resulting state to reduce or reject unreliable evidence, preserve the last known state only where appropriate, and recognize recovery when valid updates resume.
+
+## Runtime monitoring and performance evidence
+
+The main `healink` CLI provides application-level observability for health state, sensor state and periodic timing behavior. It reports the validity/freshness/fault masks together with per-workload timing information such as configured period, average execution time, maximum execution time, start jitter, deadline misses and schedule skips.
+
+A typical performance evidence flow is:
+
+```text
+./healink
+   |
+   +-- sensor / fusion state
+   +-- per-task timing statistics
+   +-- fusion latency information
+   +-- deadline / schedule exception counters
+   |
+   +-- QNX System Profiler (independent CPU/thread evidence)
+```
+
+The CLI is used for application-specific measurements; the QNX System Profiler is used to inspect CPU usage and thread scheduling behavior. Final benchmark values are taken from the target Raspberry Pi run rather than from illustrative documentation examples.
+
+## Reliable emergency communication
+
+The SX1278 link is treated as a reliability-oriented event channel rather than a simple text transmitter. Events carry identifiers and integrity information, while the communication path records retry attempts, RSSI/SNR and acknowledgment timing. The ESP32 remote node provides the acknowledgment endpoint.
+
+This communication path is kept separate from the sensor-fusion decision path so that local health classification remains available even when the radio link is unavailable.
 
 ## Build
 
@@ -72,7 +106,7 @@ src/comms/      SX1278/LoRa worker
 src/ui/         SSD1306 driver and HEALINK UI
 src/diag/       unified I2C diagnostic
 tests/          maintained fusion and safety tests
-tools/          small bring-up and soak tools
+tools/          small bring-up and lifecycle tools
 esp32/          remote LoRa ACK firmware
 docs/           current project notes
 bsp_config/     QNX SPI configuration
@@ -80,11 +114,3 @@ scripts/        BSP staging helper
 ```
 
 Generated build products are intentionally not stored in this source package.
-
-## LoRa trigger
-
-LoRa SOS transmission is manual-only in this final build. It is generated only by the QNX GPIO24 SOS button or the QNX keyboard `S` backup. Sensor distress, fall, and emergency events are logged and handled locally but never start a LoRa transmission.
-## Runtime monitoring
-
-The main `healink` CLI reports health state, sensor validity/freshness masks, and periodic timing summaries for the sensor acquisition and fusion tasks. Timing reports include the configured period, average execution time, maximum execution time, start jitter, deadline misses, and schedule skips. A periodic sensor-status report names the current state of each monitored device.
-
