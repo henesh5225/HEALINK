@@ -93,21 +93,23 @@ static bool g_lora_ready = false;
 
 static void print_timing_stats(
     const char *name,
+    const char *period_text,
     const healink_timing_stats_t *stats)
 {
-    if (stats == NULL || stats->cycles == 0ULL) {
+    if (name == NULL ||
+        period_text == NULL ||
+        stats == NULL ||
+        stats->cycles == 0ULL) {
         return;
     }
 
     if (stats->active_cycles == 0ULL) {
         printf(
-            "[TIMING] %-9s cycles=%" PRIu64
-            " active=0 avg_exec=N/A max_exec=N/A"
-            " max_jitter=%" PRIu64 "us"
-            " deadline_miss=%" PRIu64
-            " schedule_skip=%" PRIu64 "\n",
+            "[TIMING] %-9s period=%-6s avg_exec=N/A "
+            "max_exec=N/A jitter=%" PRIu64 "us "
+            "deadline_miss=%" PRIu64 " schedule_skip=%" PRIu64 "\n",
             name,
-            stats->cycles,
+            period_text,
             stats->max_start_jitter_ns / 1000U,
             stats->deadline_misses,
             stats->schedule_skips);
@@ -120,22 +122,99 @@ static void print_timing_stats(
             stats->active_cycles;
 
         printf(
-            "[TIMING] %-9s cycles=%" PRIu64
-            " active=%" PRIu64
-            " active_avg_exec=%" PRIu64 "us"
-            " active_max_exec=%" PRIu64 "us"
-            " max_jitter=%" PRIu64 "us"
-            " deadline_miss=%" PRIu64
-            " schedule_skip=%" PRIu64 "\n",
+            "[TIMING] %-9s period=%-6s avg_exec=%" PRIu64 "us "
+            "max_exec=%" PRIu64 "us jitter=%" PRIu64 "us "
+            "deadline_miss=%" PRIu64 " schedule_skip=%" PRIu64 "\n",
             name,
-            stats->cycles,
-            stats->active_cycles,
+            period_text,
             average_execution_ns / 1000U,
             stats->active_max_execution_ns / 1000U,
             stats->max_start_jitter_ns / 1000U,
             stats->deadline_misses,
             stats->schedule_skips);
     }
+}
+
+
+static void maybe_print_timing_stats(
+    const char *name,
+    const char *period_text,
+    const healink_timing_stats_t *stats,
+    uint64_t now_ns,
+    uint64_t *last_report_ns)
+{
+    const uint64_t report_interval_ns = 5000000000ULL;
+
+    if (last_report_ns == NULL ||
+        now_ns == 0ULL ||
+        stats == NULL ||
+        stats->cycles == 0ULL) {
+        return;
+    }
+
+    if (*last_report_ns == 0ULL ||
+        now_ns < *last_report_ns ||
+        (now_ns - *last_report_ns) >= report_interval_ns) {
+        print_timing_stats(name, period_text, stats);
+        *last_report_ns = now_ns;
+    }
+}
+
+
+static const char *sensor_status_text(
+    const healink_sensor_state_t *state,
+    uint32_t sensor_mask)
+{
+    if (state == NULL) {
+        return "UNKNOWN";
+    }
+
+    if ((state->offline_mask & sensor_mask) != 0U) {
+        return "OFFLINE";
+    }
+
+    if ((state->fault_mask & sensor_mask) != 0U) {
+        return "FAULT";
+    }
+
+    if ((state->stale_mask & sensor_mask) != 0U) {
+        return "STALE";
+    }
+
+    if ((state->valid_mask & sensor_mask) != 0U) {
+        return "VALID";
+    }
+
+    return "INVALID";
+}
+
+
+static const char *ads1115_status_text(void)
+{
+    /* ADS1115 is the acquisition device behind the AD8232 path. */
+    return g_ads1115_ready ? "VALID" : "OFFLINE";
+}
+
+
+static void print_sensor_status(
+    const healink_sensor_state_t *state)
+{
+    if (state == NULL) {
+        return;
+    }
+
+    printf("[SENSOR STATUS] MAX30102  : %s\n",
+           sensor_status_text(state, SENSOR_MAX30102));
+    printf("[SENSOR STATUS] ADS1115   : %s\n",
+           ads1115_status_text());
+    printf("[SENSOR STATUS] AD8232    : %s\n",
+           sensor_status_text(state, SENSOR_AD8232));
+    printf("[SENSOR STATUS] MPU6050   : %s\n",
+           sensor_status_text(state, SENSOR_MPU6050));
+    printf("[SENSOR STATUS] DS18B20   : %s\n",
+           sensor_status_text(state, SENSOR_DS18B20));
+    printf("[SENSOR STATUS] DHT11     : %s\n",
+           sensor_status_text(state, SENSOR_DHT11));
 }
 
 
@@ -420,12 +499,28 @@ static void mark_sensor_success(
 static void *max30102_thread(void *thread_arg)
 {
     uint64_t next_wakeup_ns = healink_now_ns();
+    uint64_t last_timing_report_ns = next_wakeup_ns;
+    healink_timing_stats_t timing;
+
+    healink_timing_init(&timing);
 
     (void)thread_arg;
 
     while (g_running) {
 
+        uint64_t scheduled_release_ns = next_wakeup_ns;
+        uint64_t cycle_start_ns = healink_now_ns();
+        bool is_active_cycle = false;
+
+        healink_timing_begin(
+            &timing,
+            scheduled_release_ns,
+            cycle_start_ns);
+
         if (g_max30102_ready) {
+            is_active_cycle = true;
+            timing.active_cycles++;
+
 
             uint64_t current_time_ns = healink_now_ns();
 
@@ -472,9 +567,43 @@ static void *max30102_thread(void *thread_arg)
             }
         }
 
-        (void)healink_sleep_until(
-            &next_wakeup_ns,
-            HEALINK_PERIOD_MAX30102_NS);
+        {
+            uint64_t cycle_end_ns = healink_now_ns();
+            int sleep_rc;
+
+            healink_timing_end(
+                &timing,
+                cycle_start_ns,
+                cycle_end_ns,
+                HEALINK_PERIOD_MAX30102_NS);
+
+            if (is_active_cycle) {
+                uint64_t execution_ns =
+                    (cycle_end_ns >= cycle_start_ns)
+                        ? (cycle_end_ns - cycle_start_ns)
+                        : 0ULL;
+
+                timing.active_total_execution_ns += execution_ns;
+                if (execution_ns > timing.active_max_execution_ns) {
+                    timing.active_max_execution_ns = execution_ns;
+                }
+            }
+
+            sleep_rc = healink_sleep_until(
+                &next_wakeup_ns,
+                HEALINK_PERIOD_MAX30102_NS);
+
+            if (sleep_rc > 0) {
+                timing.schedule_skips++;
+            }
+
+            maybe_print_timing_stats(
+                "MAX30102",
+                "10ms",
+                &timing,
+                cycle_end_ns,
+                &last_timing_report_ns);
+        }
     }
 
     return NULL;
@@ -484,6 +613,7 @@ static void *max30102_thread(void *thread_arg)
 static void *ad8232_thread(void *thread_arg)
 {
     uint64_t next_wakeup_ns = healink_now_ns();
+    uint64_t last_timing_report_ns = next_wakeup_ns;
     healink_timing_stats_t timing;
 
     healink_timing_init(&timing);
@@ -587,12 +717,12 @@ static void *ad8232_thread(void *thread_arg)
                 timing.schedule_skips += 1ULL;
             }
 
-            if ((timing.cycles % 250ULL) == 0ULL &&
-                timing.cycles != 0ULL) {
-                print_timing_stats(
-                    "AD8232",
-                    &timing);
-            }
+            maybe_print_timing_stats(
+                "AD8232",
+                "4ms",
+                &timing,
+                cycle_end_ns,
+                &last_timing_report_ns);
         }
     }
 
@@ -603,12 +733,28 @@ static void *ad8232_thread(void *thread_arg)
 static void *mpu6050_thread(void *thread_arg)
 {
     uint64_t next_wakeup_ns = healink_now_ns();
+    uint64_t last_timing_report_ns = next_wakeup_ns;
+    healink_timing_stats_t timing;
+
+    healink_timing_init(&timing);
 
     (void)thread_arg;
 
     while (g_running) {
 
+        uint64_t scheduled_release_ns = next_wakeup_ns;
+        uint64_t cycle_start_ns = healink_now_ns();
+        bool is_active_cycle = false;
+
+        healink_timing_begin(
+            &timing,
+            scheduled_release_ns,
+            cycle_start_ns);
+
         if (g_mpu6050_ready) {
+            is_active_cycle = true;
+            timing.active_cycles++;
+
 
             uint64_t current_time_ns = healink_now_ns();
 
@@ -670,9 +816,41 @@ static void *mpu6050_thread(void *thread_arg)
             }
         }
 
-        (void)healink_sleep_until(
-            &next_wakeup_ns,
-            HEALINK_PERIOD_MPU6050_NS);
+        {
+            uint64_t cycle_end_ns = healink_now_ns();
+            int sleep_rc;
+
+            healink_timing_end(
+                &timing,
+                cycle_start_ns,
+                cycle_end_ns,
+                HEALINK_PERIOD_MPU6050_NS);
+
+            if (is_active_cycle) {
+                uint64_t execution_ns =
+                    (cycle_end_ns >= cycle_start_ns)
+                        ? (cycle_end_ns - cycle_start_ns)
+                        : 0ULL;
+                timing.active_total_execution_ns += execution_ns;
+                if (execution_ns > timing.active_max_execution_ns) {
+                    timing.active_max_execution_ns = execution_ns;
+                }
+            }
+
+            sleep_rc = healink_sleep_until(
+                &next_wakeup_ns,
+                HEALINK_PERIOD_MPU6050_NS);
+            if (sleep_rc > 0) {
+                timing.schedule_skips++;
+            }
+
+            maybe_print_timing_stats(
+                "MPU6050",
+                "20ms",
+                &timing,
+                cycle_end_ns,
+                &last_timing_report_ns);
+        }
     }
 
     return NULL;
@@ -682,12 +860,28 @@ static void *mpu6050_thread(void *thread_arg)
 static void *ds18b20_thread(void *thread_arg)
 {
     uint64_t next_wakeup_ns = healink_now_ns();
+    uint64_t last_timing_report_ns = next_wakeup_ns;
+    healink_timing_stats_t timing;
+
+    healink_timing_init(&timing);
 
     (void)thread_arg;
 
     while (g_running) {
 
+        uint64_t scheduled_release_ns = next_wakeup_ns;
+        uint64_t cycle_start_ns = healink_now_ns();
+        bool is_active_cycle = false;
+
+        healink_timing_begin(
+            &timing,
+            scheduled_release_ns,
+            cycle_start_ns);
+
         if (g_ds18b20_ready) {
+            is_active_cycle = true;
+            timing.active_cycles++;
+
 
             uint64_t current_time_ns = healink_now_ns();
 
@@ -727,9 +921,41 @@ static void *ds18b20_thread(void *thread_arg)
             }
         }
 
-        (void)healink_sleep_until(
-            &next_wakeup_ns,
-            HEALINK_PERIOD_DS18B20_NS);
+        {
+            uint64_t cycle_end_ns = healink_now_ns();
+            int sleep_rc;
+
+            healink_timing_end(
+                &timing,
+                cycle_start_ns,
+                cycle_end_ns,
+                HEALINK_PERIOD_DS18B20_NS);
+
+            if (is_active_cycle) {
+                uint64_t execution_ns =
+                    (cycle_end_ns >= cycle_start_ns)
+                        ? (cycle_end_ns - cycle_start_ns)
+                        : 0ULL;
+                timing.active_total_execution_ns += execution_ns;
+                if (execution_ns > timing.active_max_execution_ns) {
+                    timing.active_max_execution_ns = execution_ns;
+                }
+            }
+
+            sleep_rc = healink_sleep_until(
+                &next_wakeup_ns,
+                HEALINK_PERIOD_DS18B20_NS);
+            if (sleep_rc > 0) {
+                timing.schedule_skips++;
+            }
+
+            maybe_print_timing_stats(
+                "DS18B20",
+                "1s",
+                &timing,
+                cycle_end_ns,
+                &last_timing_report_ns);
+        }
     }
 
     return NULL;
@@ -742,13 +968,28 @@ static void *dht11_thread(void *thread_arg)
      * settling time, and a single timing miss must not become a system
      * fault. */
     uint64_t next_wakeup_ns = healink_now_ns() + HEALINK_PERIOD_DHT11_NS;
+    uint64_t last_timing_report_ns = healink_now_ns();
+    healink_timing_stats_t timing;
     unsigned consecutive_failures = 0U;
+
+    healink_timing_init(&timing);
     const unsigned fault_after = 3U;
 
     (void)thread_arg;
 
     while (g_running) {
+        uint64_t scheduled_release_ns = next_wakeup_ns;
+        uint64_t cycle_start_ns = healink_now_ns();
+        bool is_active_cycle = false;
+
+        healink_timing_begin(
+            &timing,
+            scheduled_release_ns,
+            cycle_start_ns);
+
         if (g_dht11_ready) {
+            is_active_cycle = true;
+            timing.active_cycles++;
             uint64_t current_time_ns = healink_now_ns();
             int read_rc = dht11_read(&g_dht11_sensor, current_time_ns);
 
@@ -795,9 +1036,41 @@ static void *dht11_thread(void *thread_arg)
             }
         }
 
-        (void)healink_sleep_until(
-            &next_wakeup_ns,
-            HEALINK_PERIOD_DHT11_NS);
+        {
+            uint64_t cycle_end_ns = healink_now_ns();
+            int sleep_rc;
+
+            healink_timing_end(
+                &timing,
+                cycle_start_ns,
+                cycle_end_ns,
+                HEALINK_PERIOD_DHT11_NS);
+
+            if (is_active_cycle) {
+                uint64_t execution_ns =
+                    (cycle_end_ns >= cycle_start_ns)
+                        ? (cycle_end_ns - cycle_start_ns)
+                        : 0ULL;
+                timing.active_total_execution_ns += execution_ns;
+                if (execution_ns > timing.active_max_execution_ns) {
+                    timing.active_max_execution_ns = execution_ns;
+                }
+            }
+
+            sleep_rc = healink_sleep_until(
+                &next_wakeup_ns,
+                HEALINK_PERIOD_DHT11_NS);
+            if (sleep_rc > 0) {
+                timing.schedule_skips++;
+            }
+
+            maybe_print_timing_stats(
+                "DHT11",
+                "2s",
+                &timing,
+                cycle_end_ns,
+                &last_timing_report_ns);
+        }
     }
 
     return NULL;
@@ -806,6 +1079,7 @@ static void *dht11_thread(void *thread_arg)
 static void *fusion_thread(void *thread_arg)
 {
     uint64_t next_wakeup_ns = healink_now_ns();
+    uint64_t last_timing_report_ns = next_wakeup_ns;
     healink_timing_stats_t timing;
 
     healink_timing_init(&timing);
@@ -1015,12 +1289,12 @@ static void *fusion_thread(void *thread_arg)
                 timing.schedule_skips += 1ULL;
             }
 
-            if ((timing.cycles % 100ULL) == 0ULL &&
-                timing.cycles != 0ULL) {
-                print_timing_stats(
-                    "FUSION",
-                    &timing);
-            }
+            maybe_print_timing_stats(
+                "FUSION",
+                "50ms",
+                &timing,
+                cycle_end_ns,
+                &last_timing_report_ns);
         }
     }
 
@@ -1186,6 +1460,7 @@ static void *sos_button_thread(void *thread_arg)
 static void *ui_thread(void *thread_arg)
 {
     uint64_t next_wakeup_ns = healink_now_ns();
+    uint64_t last_status_report_ns = next_wakeup_ns;
     bool ui_started = false;
 
     (void)thread_arg;
@@ -1284,6 +1559,17 @@ static void *ui_thread(void *thread_arg)
             sensor_snapshot.hr_stability,
             sensor_snapshot.anomaly_score,
             sensor_snapshot.fall_confidence);
+
+        {
+            uint64_t status_time_ns = healink_now_ns();
+
+            if (last_status_report_ns == 0ULL ||
+                status_time_ns < last_status_report_ns ||
+                (status_time_ns - last_status_report_ns) >= 5000000000ULL) {
+                print_sensor_status(&sensor_snapshot);
+                last_status_report_ns = status_time_ns;
+            }
+        }
 
         /*
          * OLED rendering is presentation-only and remains outside

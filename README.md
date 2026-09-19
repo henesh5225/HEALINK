@@ -84,3 +84,7 @@ Generated build products are intentionally not stored in this source package.
 ## LoRa trigger
 
 LoRa SOS transmission is manual-only in this final build. It is generated only by the QNX GPIO24 SOS button or the QNX keyboard `S` backup. Sensor distress, fall, and emergency events are logged and handled locally but never start a LoRa transmission.
+## Runtime monitoring
+
+The main `healink` CLI reports health state, sensor validity/freshness masks, and periodic timing summaries for the sensor acquisition and fusion tasks. Timing reports include the configured period, average execution time, maximum execution time, start jitter, deadline misses, and schedule skips. A periodic sensor-status report names the current state of each monitored device.
+
