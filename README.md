@@ -1,8 +1,8 @@
-# HEALINK-SIH
+# HEALINK
 
 **Fault-Aware, Offline-First Edge-AI Personal Health Companion for Smart India Hackathon 2026 — Problem Statement #26181.**
 
-HEALINK-SIH is a wearable/edge health monitoring system built around the **IndusBoard Coin V2**, **ESP32-S2**, **FreeRTOS**, and **ESP-IDF**.
+HEALINK is a wearable/edge health monitoring system built around the **IndusBoard Coin V2**, **ESP32-S2**, **FreeRTOS**, and **ESP-IDF**.
 
 The system continuously acquires physiological, activity, and environmental information at different rates, verifies whether sensor data is trustworthy, builds a synchronized health state, compares the user's current condition with a personal baseline, and performs Edge-AI risk estimation locally.
 
@@ -10,7 +10,6 @@ The safety layer then converts those risk estimates into controlled wellness ale
 
 The communication architecture uses **Wi-Fi for normal connectivity** and **GPS + LoRa for resilient emergency assistance** when conventional network connectivity is unavailable.
 
-Bluetooth/BLE and PM2.5 sensing are intentionally outside the current project scope.
 
 ---
 
@@ -35,7 +34,7 @@ The system is intended to provide **early risk awareness and actionable assistan
 
 ## What the program does
 
-HEALINK-SIH reads physiological, motion, environmental, and contextual data from the wearable platform and processes the information through a fault-aware real-time pipeline.
+HEALINK reads physiological, motion, environmental, and contextual data from the wearable platform and processes the information through a fault-aware real-time pipeline.
 
 The system follows:
 
